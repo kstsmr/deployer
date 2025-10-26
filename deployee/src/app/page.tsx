@@ -127,10 +127,6 @@ export default function Home() {
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-6 py-10">
         <header className="rounded-3xl border border-white/10 bg-white/5 p-8 shadow-xl backdrop-blur">
           <h1 className="text-3xl font-semibold tracking-tight">TON Tact Deployer</h1>
-          <p className="mt-2 text-sm text-slate-300">
-            Проект принимает заранее сбилженный `NftProccessing` из папки <code className="rounded bg-white/10 px-2 py-0.5">/contract</code>
-            и готовит ссылку для деплоя через <code className="rounded bg-white/10 px-2 py-0.5">@tact-lang/deployer</code>.
-          </p>
         </header>
 
         <section className="rounded-3xl border border-white/10 bg-white/5 p-6 text-sm text-slate-200 shadow-inner">
@@ -185,7 +181,7 @@ export default function Home() {
           <h2 className="text-lg font-medium text-white">Готовим ссылку для деплоя</h2>
           <div className="mt-6 space-y-4">
             <label className="flex flex-col gap-2 text-sm">
-              <span className="text-slate-200">Hash из *.compiled.json</span>
+              <span className="text-slate-200">Hash</span>
               <input
                 value={hashInput}
                 onChange={(event) => setHashInput(event.target.value)}
