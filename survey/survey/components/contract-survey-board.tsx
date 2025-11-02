@@ -2,7 +2,12 @@
 
 import { useMemo, useState } from "react";
 
-import type { Network, SurveyAnswer } from "@/lib/survey/types";
+import { Buffer } from "buffer";
+import { Cell } from "@ton/core";
+import type { Slice } from "@ton/core";
+
+import type { SurveySummaryItem } from "@/lib/survey/runSurvey";
+import type { Network } from "@/lib/survey/types";
 
 export type ClientContract = {
   id: string;
@@ -21,24 +26,13 @@ export type ClientContract = {
 
 type SurveyRunResult = {
   contract: { id: string; title: string };
-  sections: Array<{
-    id: string;
-    title: string;
-    description?: string;
-    questions: Array<{
-      id: string;
-      title: string;
-      ok: boolean;
-      answer?: SurveyAnswer;
-      error?: string;
-      durationMs: number;
-    }>;
-  }>;
+  summaryCell: string;
+  summary: SurveySummaryItem[];
 };
 
 type ApiResponse = {
   status: "ok";
-  result: SurveyRunResult;
+  result: { contract: { id: string; title: string }; summaryCell: string };
 };
 
 const networkLabels: Record<Network, string> = {
@@ -46,10 +40,9 @@ const networkLabels: Record<Network, string> = {
   testnet: "Testnet",
 };
 
-const badgeColors: Record<string, string> = {
-  success: "bg-emerald-500/15 text-emerald-200 border-emerald-400/20",
-  error: "bg-rose-500/15 text-rose-200 border-rose-400/20",
-  idle: "bg-slate-500/15 text-slate-300 border-white/10",
+const statusBadge: Record<"ok" | "error", string> = {
+  ok: "text-emerald-200",
+  error: "text-rose-300",
 };
 
 export default function ContractSurveyBoard({ contracts }: { contracts: ClientContract[] }) {
@@ -62,11 +55,78 @@ export default function ContractSurveyBoard({ contracts }: { contracts: ClientCo
   );
 }
 
+function decodeSummaryCell(summaryCell: string): SurveySummaryItem[] {
+  if (!summaryCell) {
+    return [];
+  }
+
+  try {
+    const cells = Cell.fromBoc(Buffer.from(summaryCell, "base64"));
+    if (!cells.length) {
+      return [];
+    }
+
+    const slice = cells[0]!.beginParse();
+    const count = Number(slice.loadUint(16));
+    let listCell: Cell | null = count > 0 && slice.remainingRefs > 0 ? slice.loadRef() : null;
+    const items: SurveySummaryItem[] = [];
+
+    for (let index = 0; index < count; index += 1) {
+      if (!listCell) {
+        break;
+      }
+      const listSlice = listCell.beginParse();
+      const itemCell = listSlice.loadRef();
+      const itemSlice = itemCell.beginParse();
+      const ok = itemSlice.loadBit();
+      const durationMs = Number(itemSlice.loadUint(32));
+      const payloadRaw = loadStringCell(itemSlice);
+      let payload: Partial<SurveySummaryItem> = {};
+      if (payloadRaw) {
+        try {
+          payload = JSON.parse(payloadRaw) as Partial<SurveySummaryItem>;
+        } catch {
+          payload = {
+            value: payloadRaw,
+          };
+        }
+      }
+
+      items.push({
+        sectionId: payload.sectionId ?? "",
+        sectionTitle: payload.sectionTitle ?? "",
+        questionId: payload.questionId ?? "",
+        questionTitle: payload.questionTitle ?? "",
+        value: payload.value ?? "",
+        ok,
+        durationMs,
+      });
+
+      listCell = listSlice.remainingRefs > 0 ? listSlice.loadRef() : null;
+    }
+
+    return items;
+  } catch (error) {
+    console.warn("[survey] failed to decode summary cell", error);
+    return [];
+  }
+}
+
+function loadStringCell(slice: Slice): string {
+  if (slice.remainingRefs === 0) {
+    return "";
+  }
+  try {
+    const cell = slice.loadRef();
+    return cell.beginParse().loadStringRefTail();
+  } catch {
+    return "";
+  }
+}
+
 type ContractCardProps = {
   contract: ClientContract;
 };
-
-type QuestionResult = SurveyRunResult["sections"][number]["questions"][number];
 
 function ContractCard({ contract }: ContractCardProps) {
   const [address, setAddress] = useState(contract.defaultAddress);
@@ -105,7 +165,8 @@ function ContractCard({ contract }: ContractCardProps) {
 
       const data = (await response.json()) as ApiResponse & { message?: string };
       if (response.ok && data.status === "ok") {
-        setResult(data.result);
+        const summary = decodeSummaryCell(data.result.summaryCell);
+        setResult({ ...data.result, summary });
       } else {
         throw new Error(data.message || "RPC вернул ошибку");
       }
@@ -203,102 +264,95 @@ function ContractCard({ contract }: ContractCardProps) {
 
       {error && <p className="mt-4 rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</p>}
 
-      <div className="mt-6 space-y-6">
-        {contract.sections.map((section) => (
-          <QuestionSection
-            key={section.id}
-            section={section}
-            result={result?.sections.find((candidate) => candidate.id === section.id)}
-          />
-        ))}
-      </div>
+      <SummaryPanel summary={result?.summary ?? []} summaryCell={result?.summaryCell ?? ""} contract={contract} />
     </section>
   );
 }
 
-type SectionProps = {
-  section: ClientContract["sections"][number];
-  result?: SurveyRunResult["sections"][number];
+type SummaryPanelProps = {
+  summary: SurveySummaryItem[];
+  summaryCell: string;
+  contract: ClientContract;
 };
 
-function QuestionSection({ section, result }: SectionProps) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-black/20 p-5">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h3 className="text-lg font-semibold text-white">{section.title}</h3>
-          {section.description && <p className="text-sm text-slate-400">{section.description}</p>}
-        </div>
-        <span className={`rounded-full border px-3 py-1 text-xs ${result ? badgeColors.success : badgeColors.idle}`}>
-          {result ? "Ответ получен" : "В ожидании запуска"}
-        </span>
+function SummaryPanel({ summary, summaryCell, contract }: SummaryPanelProps) {
+  if (!summary.length) {
+    return (
+      <div className="mt-6 rounded-2xl border border-white/10 bg-black/20 p-6 text-sm text-slate-400">
+        <p>Запустите опрос, чтобы увидеть агрегированную выдачу.</p>
       </div>
+    );
+  }
 
-      <div className="mt-4 space-y-3">
-        {section.questions.map((question) => (
-          <QuestionCard
-            key={question.id}
-            question={question}
-            result={result?.questions.find((candidate) => candidate.id === question.id)}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-type QuestionCardProps = {
-  question: ClientContract["sections"][number]["questions"][number];
-  result?: QuestionResult;
-};
-
-function QuestionCard({ question, result }: QuestionCardProps) {
-  const status = result ? (result.ok ? "success" : "error") : "idle";
+  const successCount = summary.filter((item) => item.ok).length;
+  const errorCount = summary.length - successCount;
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+    <div className="mt-6 space-y-4 rounded-2xl border border-white/10 bg-black/20 p-6">
+      <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <p className="font-medium text-white">{question.title}</p>
-          {question.description && <p className="text-sm text-slate-400">{question.description}</p>}
+          <h3 className="text-lg font-semibold text-white">Результат опроса</h3>
+          <p className="text-sm text-slate-400">Все значения собраны в одну таблицу для быстрого просмотра.</p>
         </div>
-        <span className={`self-start rounded-full border px-3 py-1 text-xs ${badgeColors[status]}`}>
-          {status === "idle" && "Ждёт JSON-RPC"}
-          {status === "success" && `Код ${result?.answer?.exitCode ?? 0}`}
-          {status === "error" && "Ошибка"}
-        </span>
+        <div className="flex gap-3 text-xs uppercase tracking-wide">
+          <span className="rounded-full border border-emerald-400/40 px-3 py-1 text-emerald-200">
+            Успешно: {successCount}
+          </span>
+          {errorCount > 0 && (
+            <span className="rounded-full border border-rose-400/40 px-3 py-1 text-rose-300">Ошибок: {errorCount}</span>
+          )}
+        </div>
+      </header>
+
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300">
+        <p className="text-slate-200">Cell (base64):</p>
+        <p className="mt-1 break-all font-mono text-[11px] text-slate-100">{summaryCell}</p>
       </div>
 
-      {result ? (
-        result.ok && result.answer ? (
-          <div className="mt-3 space-y-3">
-            <p className="text-lg font-semibold text-white">{result.answer.headline}</p>
-            {result.answer.details?.length ? (
-              <dl className="grid gap-1 text-sm text-slate-300">
-                {result.answer.details.map((detail) => (
-                  <div key={detail.label} className="flex flex-wrap justify-between gap-2">
-                    <dt className="text-slate-400">{detail.label}</dt>
-                    <dd className="text-slate-100 text-right font-mono text-xs break-all">{detail.value}</dd>
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-white/10 text-sm">
+          <thead className="text-xs uppercase tracking-wide text-slate-400">
+            <tr>
+              <th className="px-3 py-2 text-left">Раздел</th>
+              <th className="px-3 py-2 text-left">Вопрос</th>
+              <th className="px-3 py-2 text-left">Значение</th>
+              <th className="px-3 py-2 text-left">Статус</th>
+              <th className="px-3 py-2 text-left">Время</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/10 text-slate-100">
+            {summary.map((item) => (
+              <tr key={`${item.sectionId}:${item.questionId}`} className="align-top">
+                <td className="px-3 py-3 text-xs text-slate-400">{item.sectionTitle}</td>
+                <td className="px-3 py-3 whitespace-pre-wrap text-sm font-medium text-white">{item.questionTitle}</td>
+                <td className="px-3 py-3 text-sm">
+                  <div className="rounded-2xl border border-white/5 bg-white/5 px-3 py-2 text-slate-100/90">
+                    {item.value}
                   </div>
-                ))}
-              </dl>
-            ) : null}
-            {result.answer.raw && (
-              <details className="text-xs text-slate-500">
-                <summary className="cursor-pointer text-slate-400">Ответ с консоли</summary>
-                <pre className="mt-2 max-h-48 overflow-auto rounded-xl bg-black/50 p-3 text-[11px] leading-relaxed text-slate-300">
-                  {JSON.stringify(result.answer.raw, null, 2)}
-                </pre>
-              </details>
-            )}
-            <p className="text-xs text-slate-500">Время запроса: {result.durationMs.toFixed(0)} мс</p>
-          </div>
-        ) : (
-          <p className="mt-3 text-sm text-rose-300">{result.error || "JSON-RPC ответил ошибочным кодом"}</p>
-        )
-      ) : (
-        <p className="mt-3 text-xs text-slate-500">Ожидает запуска.</p>
-      )}
+                </td>
+                <td className="px-3 py-3 text-xs font-semibold">
+                  <span className={item.ok ? statusBadge.ok : statusBadge.error}>{item.ok ? "OK" : "Ошибка"}</span>
+                </td>
+                <td className="px-3 py-3 text-xs text-slate-400">{item.durationMs.toFixed(0)} мс</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <details className="text-xs text-slate-400">
+        <summary className="cursor-pointer text-slate-300">JSON выдача</summary>
+        <pre className="mt-3 max-h-64 overflow-auto rounded-xl bg-black/40 p-4 text-[11px] leading-relaxed text-slate-200">
+          {JSON.stringify(summary, null, 2)}
+        </pre>
+      </details>
+
+      <footer className="text-xs text-slate-500">
+        <p>
+          Источник вопросов: {contract.sections.map((section) => section.title).join(", ") || "—"}. Все значения собраны в
+          одну карточку, чтобы их можно было легко скопировать или встроить в отчёт.
+        </p>
+      </footer>
     </div>
   );
 }

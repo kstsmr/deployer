@@ -139,13 +139,13 @@ function decodeNftProcessingData(dataCell: Cell): NftProcessingState {
   const owner = readMaybeAddress(slice);
   const originalOwner = readMaybeAddress(slice);
 
-  const extra = slice.loadRef().beginParse();
-  const lender = readMaybeAddress(extra);
-  const nft = readMaybeAddress(extra);
-  const loanAmount = extra.loadCoins().toString();
-  const receivedAll = extra.loadCoins().toString();
-  const nftReceived = extra.loadBit();
-  const status = extra.loadUint(8);
+  const extraSlice = slice.remainingRefs > 0 ? slice.loadRef().beginParse() : null;
+  const lender = extraSlice ? readMaybeAddress(extraSlice) : null;
+  const nft = extraSlice ? readMaybeAddress(extraSlice) : null;
+  const loanAmount = extraSlice ? extraSlice.loadCoins().toString() : "0";
+  const receivedAll = extraSlice ? extraSlice.loadCoins().toString() : "0";
+  const nftReceived = extraSlice ? extraSlice.loadBit() : false;
+  const status = extraSlice ? extraSlice.loadUint(8) : 0;
 
   return {
     nftCollectionAddress,
@@ -162,13 +162,20 @@ function decodeNftProcessingData(dataCell: Cell): NftProcessingState {
 }
 
 function readMaybeAddress(slice: import("@ton/core").Slice): string | null {
-  const type = slice.preloadUint(2);
-  if (type === 0) {
-    slice.loadUint(2);
+  try {
+    const address = slice.loadAddressAny();
+    if (!address) {
+      return null;
+    }
+    if ("toFriendly" in address && typeof (address as { toFriendly?: () => string }).toFriendly === "function") {
+      return (address as { toFriendly: () => string }).toFriendly();
+    }
+    if (typeof (address as { toString?: () => string }).toString === "function") {
+      return (address as { toString: () => string }).toString();
+    }
+    return JSON.stringify(address);
+  } catch (error) {
+    console.warn("[contracts][nft-processing] unexpected address format", error);
     return null;
   }
-  if (type !== 2) {
-    throw new Error(`Invalid address type ${type}`);
-  }
-  return slice.loadAddress().toString();
 }
